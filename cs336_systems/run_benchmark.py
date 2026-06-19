@@ -92,39 +92,52 @@ def main():
         weight_decay=args.weight_decay
     )
 
-    def run_step():
-        optimizer.zero_grad()
-        sync_clock(device)
-        t0 = timeit.default_timer()
-        out = model(test_batch)
-        sync_clock(device)
-        t_fwd = timeit.default_timer() - t0
+    def nvtx_range(label):
+        """Context manager for NVTX ranges (no-op on non-CUDA devices)."""
+        import contextlib
+        if device.type == "cuda":
+            return torch.cuda.nvtx.range(label)
+        return contextlib.nullcontext()
 
-        loss = out.mean()
-        sync_clock(device)
-        t1 = timeit.default_timer()
-        loss.backward()
-        sync_clock(device)
-        t_bwd = timeit.default_timer() - t1
+    def run_step(tag="step"):
+        with nvtx_range(tag):
+            optimizer.zero_grad()
 
-        sync_clock(device)
-        t2 = timeit.default_timer()
-        optimizer.step()
-        sync_clock(device)
-        t_opt = timeit.default_timer() - t2
+            with nvtx_range(f"{tag}/forward"):
+                sync_clock(device)
+                t0 = timeit.default_timer()
+                out = model(test_batch)
+                sync_clock(device)
+                t_fwd = timeit.default_timer() - t0
+
+            loss = out.mean()
+
+            with nvtx_range(f"{tag}/backward"):
+                sync_clock(device)
+                t1 = timeit.default_timer()
+                loss.backward()
+                sync_clock(device)
+                t_bwd = timeit.default_timer() - t1
+
+            with nvtx_range(f"{tag}/optimizer"):
+                sync_clock(device)
+                t2 = timeit.default_timer()
+                optimizer.step()
+                sync_clock(device)
+                t_opt = timeit.default_timer() - t2
 
         return t_fwd, t_bwd, t_opt
 
     # Warmup
     print(f"Running {args.warmup_steps} warmup step(s)...")
-    for _ in range(args.warmup_steps):
-        run_step()
+    for i in range(args.warmup_steps):
+        run_step(tag=f"warmup/{i}")
 
     # Benchmark
     print(f"Running {args.benchmark_steps} benchmark step(s)...")
     fwd_times, bwd_times, opt_times = [], [], []
-    for _ in range(args.benchmark_steps):
-        t_fwd, t_bwd, t_opt = run_step()
+    for i in range(args.benchmark_steps):
+        t_fwd, t_bwd, t_opt = run_step(tag=f"benchmark/{i}")
         fwd_times.append(t_fwd)
         bwd_times.append(t_bwd)
         opt_times.append(t_opt)
