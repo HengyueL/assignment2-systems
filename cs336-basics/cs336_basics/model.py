@@ -25,7 +25,10 @@ def nvtx_range(msg: str):
     These ranges show up as labels in Nsight Systems so per-layer and
     per-sublayer memory/time can be attributed during profiling.
     """
-    if torch.cuda.is_available():
+    # NVTX ranges have no meaning inside a compiled graph and Dynamo cannot
+    # trace the context manager that torch.cuda.nvtx.range returns, so make this
+    # a no-op while compiling (otherwise torch.compile(fullgraph=True) fails).
+    if torch.cuda.is_available() and not torch.compiler.is_compiling():
         return torch.cuda.nvtx.range(msg)
     return contextlib.nullcontext()
 
