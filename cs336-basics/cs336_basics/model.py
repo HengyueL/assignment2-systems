@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import math
@@ -16,6 +17,17 @@ from torch import Tensor
 from cs336_basics.nn_utils import softmax
 
 logger = logging.getLogger(__name__)
+
+
+def nvtx_range(msg: str):
+    """NVTX range that is a no-op when CUDA/NVTX is unavailable (e.g. CPU tests).
+
+    These ranges show up as labels in Nsight Systems so per-layer and
+    per-sublayer memory/time can be attributed during profiling.
+    """
+    if torch.cuda.is_available():
+        return torch.cuda.nvtx.range(msg)
+    return contextlib.nullcontext()
 
 
 class Linear(nn.Module):
@@ -248,9 +260,10 @@ class BasicsTransformerLM(nn.Module):
         # x = self.positional_encoder(embedded_tokens, positions)
         x = embedded_tokens
 
-        for layer in self.layers:
+        for i, layer in enumerate(self.layers):
             # (batch size, sequence_length, d_model)
-            x = layer(x)
+            with nvtx_range(f"layer_{i}"):
+                x = layer(x)
         # (batch size, sequence_length, d_model)
         x = self.ln_final(x)
         # (batch size, sequence_length, vocab_size)
@@ -379,11 +392,13 @@ class TransformerBlock(nn.Module):
         # NOTE: this is a pre-norm Transformer, and differs from the original
         # description in the paper.
         # Apply the multi-head self-attention sublayer
-        x_attn = self.attn(self.ln1(x))
+        with nvtx_range("attn"):
+            x_attn = self.attn(self.ln1(x))
         attn_sublayer_output = x + x_attn
 
         # Apply the feed-forward sublayer
-        x_ffn = self.ffn(self.ln2(attn_sublayer_output))
+        with nvtx_range("ffn"):
+            x_ffn = self.ffn(self.ln2(attn_sublayer_output))
         ffn_sublayer_output = attn_sublayer_output + x_ffn
         return ffn_sublayer_output
 
