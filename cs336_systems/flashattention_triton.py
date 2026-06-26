@@ -15,7 +15,8 @@ def flash_fwd_kernel(
     scale,                     # 1/sqrt(d)
     D: tl.constexpr,           # d
     Q_TILE_SIZE: tl.constexpr, # Bq
-    K_TILE_SIZE: tl.constexpr  # Bk
+    K_TILE_SIZE: tl.constexpr,  # Bk
+    is_causal: tl.constexpr
 ):
     # Program indices (2D grid)
     query_tile_index = tl.program_id(0)
@@ -82,7 +83,11 @@ def flash_fwd_kernel(
         # == Mask the padded keys in the last tile ==
         key_idx = j * K_TILE_SIZE + tl.arange(0, K_TILE_SIZE)
         Sij = tl.where(key_idx[None, :] < N_KEYS, Sij, -float("inf"))
-        # === 
+        # == Causal mask: query at position q only attends to keys k <= q ==
+        if is_causal:
+            query_idx = query_tile_index * Q_TILE_SIZE + tl.arange(0, Q_TILE_SIZE)
+            Sij = tl.where(query_idx[:, None] >= key_idx[None, :], Sij, -1e6)
+        # ===
 
         mij = tl.maximum(mi, tl.max(Sij, axis=-1, keep_dims=False))
         Pij = tl.exp(Sij - mij[:, None])
@@ -112,7 +117,7 @@ class FlashattentionTriton(torch.autograd.Function):
     @staticmethod
     def forward(
         ctx, Q, K, V,
-        is_causal:bool = False
+        is_causal: bool = False
     ):
         assert len(Q.shape) == 3, "Requires Q shape to be [batch, n_seq, D]"
         assert len(K.shape) == 3, "Requires K shape to be [batch, n_k, D]"
@@ -121,6 +126,7 @@ class FlashattentionTriton(torch.autograd.Function):
         
         ctx.Q_TILE_SIZE = 16  # Pick a fixed size and let triton handle the bundary check
         ctx.K_TILE_SIZE = 16
+        ctx.is_causal = is_causal
         
         launch_grid = (triton.cdiv(N_QUERIES, ctx.Q_TILE_SIZE), batch_size)
 
@@ -140,7 +146,8 @@ class FlashattentionTriton(torch.autograd.Function):
             N_QUERIES=N_QUERIES, N_KEYS=N_KEYS,
             scale=1./math.sqrt(D),
             D=D,
-            Q_TILE_SIZE=ctx.Q_TILE_SIZE, K_TILE_SIZE=ctx.K_TILE_SIZE
+            Q_TILE_SIZE=ctx.Q_TILE_SIZE, K_TILE_SIZE=ctx.K_TILE_SIZE,
+            is_causal=is_causal
         )
         ctx.save_for_backward(Q, K, V, O, L)
         return O
