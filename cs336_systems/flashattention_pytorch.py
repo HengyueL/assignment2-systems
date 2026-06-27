@@ -49,4 +49,21 @@ class FlashAttentionTorch(torch.autograd.Function):
     
     @staticmethod
     def backward(ctx, grad_out):
-        raise NotImplementedError
+        L_out, Q, K, V, O_out = ctx.saved_tensors
+
+        D = (O_out * grad_out).sum(dim=-1)
+
+        _, _, d = Q.shape
+        scale = 1. / math.sqrt(d)
+
+        S = (Q @ K.transpose(-2, -1)) * scale
+        P = torch.exp(S - L_out[..., None])
+
+        dV = P.transpose(-2, -1) @ grad_out
+        dP = grad_out @ V.transpose(-2, -1)
+        dS = P * (dP - D[..., None])
+        
+        dQ = dS @ K * scale
+        dK = dS.transpose(-2, -1) @ Q * scale
+
+        return dQ, dK, dV, None
