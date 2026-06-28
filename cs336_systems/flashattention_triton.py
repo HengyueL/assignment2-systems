@@ -394,5 +394,57 @@ class FlashattentionTriton(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output):
-        raise NotImplementedError
+        grad_output = grad_output.contiguous()
+        
+        Q, K, V, O, L = ctx.saved_tensors
+        batch_size, N_QUERIES, embed_dim = Q.shape
+        _, N_KEYS, _ = K.shape
+
+        # Compute D
+        D = (O * grad_output).sum(dim=-1)
+
+        # Part 1 - Get dK and dV
+        grid_1 = (triton.cdiv(N_KEYS, ctx.K_TILE_SIZE), batch_size)
+        dK, dV = torch.empty_like(K), torch.empty_like(V)
+
+        flash_bwd_kernel_KV[grid_1](
+            Q, K, V,
+            grad_output, L, D,
+            dK, dV,
+            stride_qb=Q.stride(0), stride_qq=Q.stride(1), stride_qd=Q.stride(2),
+            stride_kb=K.stride(0), stride_kk=K.stride(1), stride_kd=K.stride(2),
+            stride_vb=V.stride(0), stride_vk=V.stride(1), stride_vd=V.stride(2),
+            stride_ob=O.stride(0), stride_oq=O.stride(1), stride_od=O.stride(2),
+            stride_lb=L.stride(0), stride_lq=L.stride(1),
+            stride_db=D.stride(0), stride_dq=D.stride(1),
+            N_QUERIES=N_QUERIES, N_KEYS=N_KEYS,
+            scale=(1/math.sqrt(embed_dim)),
+            D=embed_dim,
+            Q_TILE_SIZE=ctx.Q_TILE_SIZE,
+            K_TILE_SIZE=ctx.K_TILE_SIZE,
+            is_causal=ctx.is_causal
+        )
+
+        # Part_ 2 - get dS
+        grid_2 = (triton.cdiv(N_QUERIES, ctx.Q_TILE_SIZE), batch_size)
+        dQ = torch.empty_like(Q)
+
+        flash_bwd_kernel_Q[grid_2](
+            Q, K, V,
+            grad_output, L, D,
+            dQ,
+            stride_qb=Q.stride(0), stride_qq=Q.stride(1), stride_qd=Q.stride(2),
+            stride_kb=K.stride(0), stride_kk=K.stride(1), stride_kd=K.stride(2),
+            stride_vb=V.stride(0), stride_vk=V.stride(1), stride_vd=V.stride(2),
+            stride_ob=O.stride(0), stride_oq=O.stride(1), stride_od=O.stride(2),
+            stride_lb=L.stride(0), stride_lq=L.stride(1),
+            stride_db=D.stride(0), stride_dq=D.stride(1),
+            N_QUERIES=N_QUERIES, N_KEYS=N_KEYS,
+            scale=(1/math.sqrt(embed_dim)),
+            D=embed_dim,
+            Q_TILE_SIZE=ctx.Q_TILE_SIZE,
+            K_TILE_SIZE=ctx.K_TILE_SIZE,
+            is_causal=ctx.is_causal
+        )
+        return dQ, dK, dV, None
 
