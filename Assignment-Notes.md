@@ -52,3 +52,11 @@ low-precision one to hit tensor cores). Result comes back fp32 for free.
 fp32.
 4. Am I storing it to global memory? → cast to that buffer's element_ty.
 5. Is everything already fp32? → you need none of the above. (This is why your fp32 path "just works.")
+
+# Customized backward pass
+
+PyTorch `grad_output` can give a non-contiguous tensor. It is safer to call:
+```
+grad_output = grad_output.continuous()
+```
+for the safe implementation of kernel backward pass.
